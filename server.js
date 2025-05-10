@@ -25,27 +25,32 @@ app.get('/health', (req, res) => {
 app.post('/api/vapi/prepare-sequential-transfer', (req, res) => {
   console.log('--- New Request to /api/vapi/prepare-sequential-transfer ---');
   console.log('Timestamp:', new Date().toISOString());
-  console.log('Raw Request Body from VAPI (type):', typeof req.body);
-  console.log('Request Body from VAPI (stringified):', JSON.stringify(req.body, null, 2));
-
-  // Log all top-level keys of req.body
-  if (req.body && typeof req.body === 'object') {
-    console.log('--- Top-level keys in req.body ---');
-    for (const key in req.body) {
-      if (req.body.hasOwnProperty(key)) {
-        console.log(`Key: "${key}", Type: ${typeof req.body[key]}`);
-      }
-    }
-    console.log('--- End Top-level keys ---');
+  
+  // Log the raw body before JSON.stringify to see its state if stringify fails
+  console.log('Raw req.body reference:', req.body); 
+  try {
+    console.log('Request Body from VAPI (stringified):', JSON.stringify(req.body, null, 2));
+  } catch (e) {
+    console.error('Error stringifying req.body:', e);
   }
 
+  // Log all top-level keys of req.body
+  if (req.body && typeof req.body === 'object' && req.body !== null) {
+    console.log('--- Top-level keys in req.body ---');
+    for (const key in req.body) {
+      // No hasOwnProperty check here for now, to see all enumerable keys
+      console.log(`Key: "${key}", Type: ${typeof req.body[key]}, Value: ${JSON.stringify(req.body[key])?.substring(0,100)}`);
+    }
+    console.log('--- End Top-level keys ---');
+  } else {
+    console.log('req.body is not a valid object or is null/undefined.');
+  }
 
   let departmentName;
   let actualVapiCallId;
   let actualUserPhoneNumber;
-  let toolCallIdForResponse = "unknown_tool_call_id";
+  let toolCallIdForResponse = "unknown_tool_call_id"; // Default
 
-  // --- Safely extract data ---
   try {
     const body = req.body; 
 
@@ -71,11 +76,11 @@ app.post('/api/vapi/prepare-sequential-transfer', (req, res) => {
     }
 
     // 3. Extract actualVapiCallId
-    console.log("--- Debugging req.body['call'] ---");
-    const callObject = body["call"]; // Using bracket notation
-    console.log(`Type of callObject (using body["call"]): ${typeof callObject}`);
+    console.log("--- Debugging req.body.call (direct access) ---");
+    const callObject = body.call; // Direct dot notation
+    console.log(`Type of callObject (body.call): ${typeof callObject}`);
     if (callObject && typeof callObject === 'object' && callObject !== null) {
-        console.log(`callObject (from body["call"]) keys: ${Object.keys(callObject)}`);
+        console.log(`callObject (from body.call) keys: ${Object.keys(callObject)}`);
         if (callObject.id && typeof callObject.id === 'string' && callObject.id.trim() !== '') {
             actualVapiCallId = callObject.id;
             console.log(`SUCCESS: Extracted actualVapiCallId from callObject.id: '${actualVapiCallId}'`);
@@ -83,13 +88,13 @@ app.post('/api/vapi/prepare-sequential-transfer', (req, res) => {
             console.warn(`WARNING: callObject.id is missing, not a string, or empty. Value: '${callObject.id}'`);
         }
     } else {
-        console.warn('WARNING: callObject (from body["call"]) is not a valid object or is null.');
+        console.warn('WARNING: callObject (body.call) is not a valid object or is null.');
     }
 
     // 4. Extract actualUserPhoneNumber
     if (callObject && typeof callObject === 'object' && callObject !== null &&
         callObject.customer && typeof callObject.customer === 'object' && callObject.customer !== null) {
-        console.log(`callObject.customer (from body["call"].customer) keys: ${Object.keys(callObject.customer)}`);
+        console.log(`callObject.customer (from body.call.customer) keys: ${Object.keys(callObject.customer)}`);
         if (callObject.customer.number && typeof callObject.customer.number === 'string' && callObject.customer.number.trim() !== '') {
             actualUserPhoneNumber = callObject.customer.number;
             console.log(`SUCCESS: Extracted actualUserPhoneNumber from callObject.customer.number: '${actualUserPhoneNumber}'`);
@@ -97,7 +102,7 @@ app.post('/api/vapi/prepare-sequential-transfer', (req, res) => {
             console.warn(`WARNING: callObject.customer.number is missing, not a string, or empty. Value: '${callObject.customer.number}'`);
         }
     } else {
-        console.warn('WARNING: callObject.customer is not a valid object, is null, or callObject itself is invalid.');
+        console.warn('WARNING: callObject.customer is not a valid object, is null, or callObject itself is invalid for customer lookup.');
         actualUserPhoneNumber = null;
     }
 
