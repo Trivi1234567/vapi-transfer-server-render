@@ -39,7 +39,7 @@ app.post('/api/vapi/prepare-sequential-transfer', (req, res) => {
   try {
     const body = req.body; 
 
-    // 1. Extract toolCallIdForResponse and departmentName from message.toolCallList
+    // 1. Extract toolCallIdForResponse and departmentName
     if (body && body.message && body.message.toolCallList && Array.isArray(body.message.toolCallList) && body.message.toolCallList.length > 0) {
       const firstToolCall = body.message.toolCallList[0];
       if (firstToolCall && firstToolCall.id) {
@@ -71,7 +71,6 @@ app.post('/api/vapi/prepare-sequential-transfer', (req, res) => {
     }
 
     // 2. Extract actualVapiCallId and actualUserPhoneNumber from req.body.message.call
-    // This aligns with VAPI Custom Tools documentation for the 'message' object structure.
     console.log("--- Debugging req.body.message.call ---");
     if (body && body.message && body.message.call && typeof body.message.call === 'object' && body.message.call !== null) {
       const messageCallObject = body.message.call;
@@ -98,9 +97,13 @@ app.post('/api/vapi/prepare-sequential-transfer', (req, res) => {
 
   } catch (e) {
     console.error('!!! UNEXPECTED ERROR during data extraction !!!:', e.message, e.stack);
+    // Ensure toolCallIdForResponse is defined, even if it's the default "unknown..."
+    const responseToolCallId = toolCallIdForResponse || "unknown_tool_call_id_in_error";
     return res.status(500).json({
-        toolCallId: toolCallIdForResponse,
-        result: "Internal server error during request processing."
+        results: [{ // VAPI expects 'results' to be an array
+            toolCallId: responseToolCallId,
+            result: "Internal server error during request processing."
+        }]
     });
   }
 
@@ -108,16 +111,20 @@ app.post('/api/vapi/prepare-sequential-transfer', (req, res) => {
   if (!departmentName) {
     console.error('CRITICAL_VALIDATION_FAILURE: departmentName is missing or invalid. Cannot proceed.');
     return res.status(400).json({
-      toolCallId: toolCallIdForResponse,
-      result: "Error: Missing or invalid 'departmentName' parameter from VAPI's tool call."
+      results: [{ // VAPI expects 'results' to be an array
+          toolCallId: toolCallIdForResponse,
+          result: "Error: Missing or invalid 'departmentName' parameter from VAPI's tool call."
+      }]
     });
   }
 
   if (!actualVapiCallId) {
     console.error("CRITICAL_VALIDATION_FAILURE: actualVapiCallId could not be determined. Cannot proceed.");
     return res.status(400).json({
-      toolCallId: toolCallIdForResponse,
-      result: "Error: Critical identifier 'vapiCallId' could not be determined from request payload."
+      results: [{ // VAPI expects 'results' to be an array
+          toolCallId: toolCallIdForResponse,
+          result: "Error: Critical identifier 'vapiCallId' could not be determined from request payload."
+      }]
     });
   }
 
@@ -135,9 +142,12 @@ app.post('/api/vapi/prepare-sequential-transfer', (req, res) => {
   console.log(`SUCCESS_PROCESS: Prepared for sequential transfer for storageKey '${storageKey}' to department: ${departmentName}`);
   console.log('Current pendingTransfers:', JSON.stringify(pendingTransfers, null, 2));
 
+  // Send success response back to VAPI in the correct format
   res.status(200).json({
-    toolCallId: toolCallIdForResponse,
-    result: `Successfully prepared for transfer to ${departmentName}. Ready for call.`
+    results: [{ // VAPI expects 'results' to be an array
+        toolCallId: toolCallIdForResponse, 
+        result: `Successfully prepared for transfer to ${departmentName}. Ready for call.`
+    }]
   });
 });
 
