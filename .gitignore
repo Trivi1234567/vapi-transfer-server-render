@@ -1,0 +1,13 @@
+# Dependencies
+node_modules/
+
+# Environment variables
+.env
+
+# Optional: Operating System generated files
+.DS_Store
+Thumbs.db
+
+# Optional: Log files
+*.log
+logs/
