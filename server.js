@@ -11,7 +11,7 @@ const pendingTransfers = {};
 // Initialize the Express application
 const app = express();
 
-// Middleware to parse JSON bodies (increased limit just in case)
+// Middleware to parse JSON bodies
 app.use(express.json({ limit: '5mb' }));
 app.use(express.urlencoded({ extended: true, limit: '5mb' }));
 
@@ -29,13 +29,12 @@ app.post('/api/vapi/prepare-sequential-transfer', (req, res) => {
     console.log('Request Body from VAPI (stringified):', JSON.stringify(req.body, null, 2));
   } catch (e) {
     console.error('Error stringifying req.body:', e);
-    // Still proceed, req.body might be a non-plain object that stringify has issues with but direct access works
   }
 
   let departmentName;
   let actualVapiCallId;
   let actualUserPhoneNumber;
-  let toolCallIdForResponse = "unknown_tool_call_id";
+  let toolCallIdForResponse = "unknown_tool_call_id"; 
 
   try {
     const body = req.body; 
@@ -57,8 +56,7 @@ app.post('/api/vapi/prepare-sequential-transfer', (req, res) => {
         console.warn('WARNING: departmentName not found in message.toolCallList[0].function.arguments.departmentName');
       }
     } else {
-      console.warn('WARNING: body.message.toolCallList is not as expected.');
-      // Attempt fallback for toolCallId if primary path failed
+      console.warn('WARNING: body.message.toolCallList is not as expected. Attempting fallback for toolCallId and departmentName.');
       if (body && body.toolCall && body.toolCall.toolCallId) { 
         toolCallIdForResponse = body.toolCall.toolCallId;
         console.log(`SUCCESS (Fallback): Extracted toolCallIdForResponse from toolCall.toolCallId: ${toolCallIdForResponse}`);
@@ -72,11 +70,12 @@ app.post('/api/vapi/prepare-sequential-transfer', (req, res) => {
       }
     }
 
-    // 2. Extract actualVapiCallId and actualUserPhoneNumber from req.body.message.call (as per VAPI Tool Docs)
+    // 2. Extract actualVapiCallId and actualUserPhoneNumber from req.body.message.call
+    // This aligns with VAPI Custom Tools documentation for the 'message' object structure.
     console.log("--- Debugging req.body.message.call ---");
     if (body && body.message && body.message.call && typeof body.message.call === 'object' && body.message.call !== null) {
       const messageCallObject = body.message.call;
-      console.log(`messageCallObject (body.message.call) keys: ${Object.keys(messageCallObject)}`);
+      console.log(`SUCCESS: body.message.call is an object. Keys: ${Object.keys(messageCallObject).join(', ')}`);
       
       if (messageCallObject.id && typeof messageCallObject.id === 'string' && messageCallObject.id.trim() !== '') {
         actualVapiCallId = messageCallObject.id;
@@ -90,27 +89,11 @@ app.post('/api/vapi/prepare-sequential-transfer', (req, res) => {
         actualUserPhoneNumber = messageCallObject.customer.number;
         console.log(`SUCCESS: Extracted actualUserPhoneNumber from body.message.call.customer.number: '${actualUserPhoneNumber}'`);
       } else {
-        console.warn(`WARNING: body.message.call.customer.number is missing, not a string, or empty. Value: ${messageCallObject.customer ? messageCallObject.customer.number : 'customer object missing'}`);
+        console.warn(`WARNING: body.message.call.customer.number is missing, not a string, or empty. Value: ${messageCallObject.customer ? messageCallObject.customer.number : 'customer object missing in message.call'}`);
         actualUserPhoneNumber = null;
       }
     } else {
-      console.warn('WARNING: body.message.call is not a valid object or is null. Will check top-level body.call as a last resort.');
-      // Last resort: check top-level body.call if message.call failed (contradicts for...in but aligns with stringify)
-      if (body && body.call && typeof body.call === 'object' && body.call !== null) {
-        const topLevelCallObject = body.call;
-        console.log(`(Fallback Check) topLevelCallObject (body.call) keys: ${Object.keys(topLevelCallObject)}`);
-        if (topLevelCallObject.id && typeof topLevelCallObject.id === 'string' && topLevelCallObject.id.trim() !== '') {
-            actualVapiCallId = topLevelCallObject.id;
-            console.log(`SUCCESS (Fallback): Extracted actualVapiCallId from top-level body.call.id: '${actualVapiCallId}'`);
-        }
-         if (topLevelCallObject.customer && typeof topLevelCallObject.customer === 'object' && topLevelCallObject.customer !== null &&
-            topLevelCallObject.customer.number && typeof topLevelCallObject.customer.number === 'string' && topLevelCallObject.customer.number.trim() !== '') {
-            actualUserPhoneNumber = topLevelCallObject.customer.number;
-            console.log(`SUCCESS (Fallback): Extracted actualUserPhoneNumber from top-level body.call.customer.number: '${actualUserPhoneNumber}'`);
-        } else if (!actualUserPhoneNumber) { // Only set to null if not already found via message.call.customer
-            actualUserPhoneNumber = null;
-        }
-      }
+      console.warn('WARNING: body.message.call is not a valid object or is null. This is the primary expected path for call context.');
     }
 
   } catch (e) {
