@@ -6,8 +6,8 @@ const dotenv = require('dotenv');
 dotenv.config();
 
 // Temporary in-memory store for pending transfers
-// Key: userPhoneNumber (or vapiCallId if userPhoneNumber is not available)
-// Value: { departmentName, vapiCallIdFromCallObject, timestamp, status }
+// Key: actualUserPhoneNumber (if available) or actualVapiCallId
+// Value: { departmentName, vapiCallId: actualVapiCallId, userPhoneNumber: actualUserPhoneNumber, timestamp, status }
 const pendingTransfers = {};
 
 // Initialize the Express application
@@ -32,92 +32,91 @@ app.post('/api/vapi/prepare-sequential-transfer', (req, res) => {
   console.log('Received request on /api/vapi/prepare-sequential-transfer');
   console.log('Request Body from VAPI:', JSON.stringify(req.body, null, 2));
 
-  let departmentName, vapiCallIdFromToolArgs, userPhoneNumberFromToolArgs;
-  let vapiCallIdFromCallObject; // The main call ID from req.body.call.id
-  let userPhoneNumberFromCallObject; // From req.body.call.customer.number
+  let departmentNameFromLlmArgs;
+  let vapiCallIdFromLlmArgs;
+  let userPhoneNumberFromLlmArgs;
   let toolCallIdForResponse; // The ID VAPI sends for this specific tool invocation
 
   // Extract toolCallId for the response (VAPI expects this back)
-  // Based on logs: req.body.message.toolCallList[0].id
   if (req.body.message && req.body.message.toolCallList && req.body.message.toolCallList.length > 0) {
     toolCallIdForResponse = req.body.message.toolCallList[0].id;
-  } else if (req.body.toolCall && req.body.toolCall.toolCallId) { // Older VAPI structure or alternative
+  } else if (req.body.toolCall && req.body.toolCall.toolCallId) { // Fallback for older/alternative structure
     toolCallIdForResponse = req.body.toolCall.toolCallId;
   }
   console.log(`Extracted toolCallIdForResponse: ${toolCallIdForResponse}`);
 
-
   // Extract parameters passed by the LLM within the tool arguments
-  // Based on logs: req.body.message.toolCallList[0].arguments
   if (req.body.message && req.body.message.toolCallList && req.body.message.toolCallList.length > 0 && req.body.message.toolCallList[0].arguments) {
     const toolArguments = req.body.message.toolCallList[0].arguments;
-    departmentName = toolArguments.departmentName; // This was missing in the test call
-    vapiCallIdFromToolArgs = toolArguments.vapiCallId; // LLM was supposed to pass this
-    userPhoneNumberFromToolArgs = toolArguments.userPhoneNumber; // LLM was supposed to pass this
-    console.log(`Tool Arguments: departmentName='${departmentName}', vapiCallIdFromToolArgs='${vapiCallIdFromToolArgs}', userPhoneNumberFromToolArgs='${userPhoneNumberFromToolArgs}'`);
+    departmentNameFromLlmArgs = toolArguments.departmentName;
+    vapiCallIdFromLlmArgs = toolArguments.vapiCallId;
+    userPhoneNumberFromLlmArgs = toolArguments.userPhoneNumber;
+    console.log(`LLM Tool Arguments: departmentName='${departmentNameFromLlmArgs}', vapiCallIdFromLlmArgs='${vapiCallIdFromLlmArgs}', userPhoneNumberFromLlmArgs='${userPhoneNumberFromLlmArgs}'`);
   } else {
-    console.warn('Could not find tool arguments in req.body.message.toolCallList[0].arguments');
+    console.warn('Could not find tool arguments in req.body.message.toolCallList[0].arguments. Department name will likely be missing.');
   }
 
-  // Extract overall call information (more reliable source for call ID and user number)
-  // Based on logs: req.body.call.id and req.body.call.customer.number
-  if (req.body.call) {
-    vapiCallIdFromCallObject = req.body.call.id;
-    if (req.body.call.customer && req.body.call.customer.number) {
-      userPhoneNumberFromCallObject = req.body.call.customer.number;
-    }
-    console.log(`Call Object Info: vapiCallIdFromCallObject='${vapiCallIdFromCallObject}', userPhoneNumberFromCallObject='${userPhoneNumberFromCallObject}'`);
+  // --- Determine actual identifiers ---
+  let actualVapiCallId;
+  let actualUserPhoneNumber;
+
+  // Prioritize identifiers from the main 'call' object in the VAPI payload
+  if (req.body.call && req.body.call.id) {
+    actualVapiCallId = req.body.call.id;
+    console.log(`Using vapiCallId from req.body.call.id: ${actualVapiCallId}`);
+  } else if (vapiCallIdFromLlmArgs && vapiCallIdFromLlmArgs.toLowerCase() !== "call.id" && vapiCallIdFromLlmArgs.toLowerCase() !== "[call.id]") {
+    actualVapiCallId = vapiCallIdFromLlmArgs; // Use LLM arg if it's not a placeholder and primary source is missing
+    console.log(`Warning: req.body.call.id missing. Using vapiCallId from LLM arguments: ${actualVapiCallId}`);
   } else {
-    console.warn('Could not find req.body.call object for primary call identifiers.');
+    console.error("CRITICAL: vapiCallId could not be determined from req.body.call.id or valid LLM argument.");
+    return res.status(400).json({
+      toolCallId: toolCallIdForResponse,
+      result: "Error: Critical identifier 'vapiCallId' could not be determined."
+    });
   }
 
-  // Prioritize identifiers from the main 'call' object if available, as they are more direct.
-  const finalVapiCallId = vapiCallIdFromCallObject || vapiCallIdFromToolArgs;
-  const finalUserPhoneNumber = userPhoneNumberFromCallObject || userPhoneNumberFromToolArgs;
+  if (req.body.call && req.body.call.customer && req.body.call.customer.number) {
+    actualUserPhoneNumber = req.body.call.customer.number;
+    console.log(`Using userPhoneNumber from req.body.call.customer.number: ${actualUserPhoneNumber}`);
+  } else if (userPhoneNumberFromLlmArgs && userPhoneNumberFromLlmArgs.toLowerCase() !== "call.customer.number" && userPhoneNumberFromLlmArgs.toLowerCase() !== "[call.customer.number]") {
+    actualUserPhoneNumber = userPhoneNumberFromLlmArgs; // Use LLM arg if not placeholder and primary source is missing
+    console.log(`Warning: req.body.call.customer.number missing. Using userPhoneNumber from LLM arguments: ${actualUserPhoneNumber}`);
+  } else {
+    console.log("User phone number not available from req.body.call.customer.number or valid LLM argument. Will proceed if vapiCallId is present.");
+    actualUserPhoneNumber = null; // Explicitly null if not found or is placeholder
+  }
+  
+  // Use the departmentName provided by the LLM
+  const finalDepartmentName = departmentNameFromLlmArgs;
 
-  // Validate required parameters
-  if (!departmentName) { // departmentName is the critical one LLM needs to provide
+  // Validate departmentName (must be provided by LLM)
+  if (!finalDepartmentName) {
     console.error('CRITICAL: departmentName is missing in the request from VAPI tool arguments.');
     return res.status(400).json({
-      toolCallId: toolCallIdForResponse, // Send back the ID VAPI gave us for this tool call
+      toolCallId: toolCallIdForResponse,
       result: `Error: Missing required 'departmentName' parameter from VAPI. Cannot proceed.`
     });
   }
-  if (!finalVapiCallId) {
-    console.error('CRITICAL: Could not determine vapiCallId from request.');
-     return res.status(400).json({
-      toolCallId: toolCallIdForResponse,
-      result: `Error: Missing 'vapiCallId' in the request from VAPI. Cannot proceed.`
-    });
-  }
 
-  // Use finalUserPhoneNumber as the primary key for pendingTransfers if available, otherwise finalVapiCallId.
-  const storageKey = finalUserPhoneNumber || finalVapiCallId;
-  if (!storageKey) {
-    // This case should ideally not be reached if finalVapiCallId is present
-    console.error('CRITICAL: Could not determine a storage key (finalUserPhoneNumber or finalVapiCallId is missing).');
-    return res.status(400).json({
-      toolCallId: toolCallIdForResponse,
-      result: "Error: Cannot store pending transfer, critical identifiers are missing."
-    });
-  }
+  // Determine storage key
+  const storageKey = actualUserPhoneNumber || actualVapiCallId; // actualVapiCallId should always be valid here
 
   // Store the information
   pendingTransfers[storageKey] = {
-    departmentName,
-    vapiCallId: finalVapiCallId, // Store the most reliable VAPI call ID
-    userPhoneNumber: finalUserPhoneNumber || 'N/A',
+    departmentName: finalDepartmentName,
+    vapiCallId: actualVapiCallId,
+    userPhoneNumber: actualUserPhoneNumber || 'N/A', // Store 'N/A' if null
     timestamp: new Date().toISOString(),
     status: 'pending_vapi_transfer_to_twilio'
   };
 
-  console.log(`Prepared for sequential transfer for storageKey '${storageKey}' to department: ${departmentName}`);
+  console.log(`Prepared for sequential transfer for storageKey '${storageKey}' to department: ${finalDepartmentName}`);
   console.log('Current pendingTransfers:', JSON.stringify(pendingTransfers, null, 2));
 
   // Send success response back to VAPI
   res.status(200).json({
-    toolCallId: toolCallIdForResponse, // Crucial: use the ID from VAPI's request
-    result: `Successfully prepared for transfer to ${departmentName}. Ready for call.`
+    toolCallId: toolCallIdForResponse,
+    result: `Successfully prepared for transfer to ${finalDepartmentName}. Ready for call.`
   });
 });
 
