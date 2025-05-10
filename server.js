@@ -11,9 +11,9 @@ const pendingTransfers = {};
 // Initialize the Express application
 const app = express();
 
-// Middleware to parse JSON bodies
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+// Middleware to parse JSON bodies (increased limit just in case)
+app.use(express.json({ limit: '5mb' }));
+app.use(express.urlencoded({ extended: true, limit: '5mb' }));
 
 const PORT = process.env.PORT || 3000;
 
@@ -25,85 +25,92 @@ app.get('/health', (req, res) => {
 app.post('/api/vapi/prepare-sequential-transfer', (req, res) => {
   console.log('--- New Request to /api/vapi/prepare-sequential-transfer ---');
   console.log('Timestamp:', new Date().toISOString());
-  
-  // Log the raw body before JSON.stringify to see its state if stringify fails
-  console.log('Raw req.body reference:', req.body); 
   try {
     console.log('Request Body from VAPI (stringified):', JSON.stringify(req.body, null, 2));
   } catch (e) {
     console.error('Error stringifying req.body:', e);
-  }
-
-  // Log all top-level keys of req.body
-  if (req.body && typeof req.body === 'object' && req.body !== null) {
-    console.log('--- Top-level keys in req.body ---');
-    for (const key in req.body) {
-      // No hasOwnProperty check here for now, to see all enumerable keys
-      console.log(`Key: "${key}", Type: ${typeof req.body[key]}, Value: ${JSON.stringify(req.body[key])?.substring(0,100)}`);
-    }
-    console.log('--- End Top-level keys ---');
-  } else {
-    console.log('req.body is not a valid object or is null/undefined.');
+    // Still proceed, req.body might be a non-plain object that stringify has issues with but direct access works
   }
 
   let departmentName;
   let actualVapiCallId;
   let actualUserPhoneNumber;
-  let toolCallIdForResponse = "unknown_tool_call_id"; // Default
+  let toolCallIdForResponse = "unknown_tool_call_id";
 
   try {
     const body = req.body; 
 
-    // 1. Extract toolCallIdForResponse
-    if (body && body.message && body.message.toolCallList && Array.isArray(body.message.toolCallList) && body.message.toolCallList.length > 0 && body.message.toolCallList[0] && body.message.toolCallList[0].id) {
-      toolCallIdForResponse = body.message.toolCallList[0].id;
-      console.log(`SUCCESS: Extracted toolCallIdForResponse from message.toolCallList[0].id: ${toolCallIdForResponse}`);
-    } else if (body && body.toolCall && body.toolCall.toolCallId) { 
+    // 1. Extract toolCallIdForResponse and departmentName from message.toolCallList
+    if (body && body.message && body.message.toolCallList && Array.isArray(body.message.toolCallList) && body.message.toolCallList.length > 0) {
+      const firstToolCall = body.message.toolCallList[0];
+      if (firstToolCall && firstToolCall.id) {
+        toolCallIdForResponse = firstToolCall.id;
+        console.log(`SUCCESS: Extracted toolCallIdForResponse from message.toolCallList[0].id: ${toolCallIdForResponse}`);
+      } else {
+        console.warn('WARNING: message.toolCallList[0].id missing.');
+      }
+
+      if (firstToolCall && firstToolCall.function && firstToolCall.function.arguments && firstToolCall.function.arguments.departmentName) {
+        departmentName = firstToolCall.function.arguments.departmentName;
+        console.log(`SUCCESS: Extracted departmentName from LLM args: '${departmentName}'`);
+      } else {
+        console.warn('WARNING: departmentName not found in message.toolCallList[0].function.arguments.departmentName');
+      }
+    } else {
+      console.warn('WARNING: body.message.toolCallList is not as expected.');
+      // Attempt fallback for toolCallId if primary path failed
+      if (body && body.toolCall && body.toolCall.toolCallId) { 
         toolCallIdForResponse = body.toolCall.toolCallId;
         console.log(`SUCCESS (Fallback): Extracted toolCallIdForResponse from toolCall.toolCallId: ${toolCallIdForResponse}`);
-    } else {
-      console.warn('WARNING: toolCallIdForResponse could not be extracted from expected paths.');
-    }
-
-    // 2. Extract departmentName from LLM arguments
-    if (body && body.message && body.message.toolCallList && Array.isArray(body.message.toolCallList) && body.message.toolCallList.length > 0 &&
-        body.message.toolCallList[0] && body.message.toolCallList[0].function && body.message.toolCallList[0].function.arguments &&
-        body.message.toolCallList[0].function.arguments.departmentName) {
-      departmentName = body.message.toolCallList[0].function.arguments.departmentName;
-      console.log(`SUCCESS: Extracted departmentName from LLM args: '${departmentName}'`);
-    } else {
-      console.warn('WARNING: departmentName not found in message.toolCallList[0].function.arguments.departmentName');
-    }
-
-    // 3. Extract actualVapiCallId
-    console.log("--- Debugging req.body.call (direct access) ---");
-    const callObject = body.call; // Direct dot notation
-    console.log(`Type of callObject (body.call): ${typeof callObject}`);
-    if (callObject && typeof callObject === 'object' && callObject !== null) {
-        console.log(`callObject (from body.call) keys: ${Object.keys(callObject)}`);
-        if (callObject.id && typeof callObject.id === 'string' && callObject.id.trim() !== '') {
-            actualVapiCallId = callObject.id;
-            console.log(`SUCCESS: Extracted actualVapiCallId from callObject.id: '${actualVapiCallId}'`);
-        } else {
-            console.warn(`WARNING: callObject.id is missing, not a string, or empty. Value: '${callObject.id}'`);
+        if (body.toolCall.parameters && body.toolCall.parameters.departmentName){
+            departmentName = body.toolCall.parameters.departmentName;
+            console.log(`SUCCESS (Fallback): Extracted departmentName from toolCall.parameters: '${departmentName}'`);
+        } else if (body.toolCall.function && body.toolCall.function.arguments && body.toolCall.function.arguments.departmentName){
+            departmentName = body.toolCall.function.arguments.departmentName;
+            console.log(`SUCCESS (Fallback): Extracted departmentName from toolCall.function.arguments: '${departmentName}'`);
         }
-    } else {
-        console.warn('WARNING: callObject (body.call) is not a valid object or is null.');
+      }
     }
 
-    // 4. Extract actualUserPhoneNumber
-    if (callObject && typeof callObject === 'object' && callObject !== null &&
-        callObject.customer && typeof callObject.customer === 'object' && callObject.customer !== null) {
-        console.log(`callObject.customer (from body.call.customer) keys: ${Object.keys(callObject.customer)}`);
-        if (callObject.customer.number && typeof callObject.customer.number === 'string' && callObject.customer.number.trim() !== '') {
-            actualUserPhoneNumber = callObject.customer.number;
-            console.log(`SUCCESS: Extracted actualUserPhoneNumber from callObject.customer.number: '${actualUserPhoneNumber}'`);
-        } else {
-            console.warn(`WARNING: callObject.customer.number is missing, not a string, or empty. Value: '${callObject.customer.number}'`);
-        }
-    } else {
-        console.warn('WARNING: callObject.customer is not a valid object, is null, or callObject itself is invalid for customer lookup.');
+    // 2. Extract actualVapiCallId and actualUserPhoneNumber from req.body.message.call (as per VAPI Tool Docs)
+    console.log("--- Debugging req.body.message.call ---");
+    if (body && body.message && body.message.call && typeof body.message.call === 'object' && body.message.call !== null) {
+      const messageCallObject = body.message.call;
+      console.log(`messageCallObject (body.message.call) keys: ${Object.keys(messageCallObject)}`);
+      
+      if (messageCallObject.id && typeof messageCallObject.id === 'string' && messageCallObject.id.trim() !== '') {
+        actualVapiCallId = messageCallObject.id;
+        console.log(`SUCCESS: Extracted actualVapiCallId from body.message.call.id: '${actualVapiCallId}'`);
+      } else {
+        console.warn(`WARNING: body.message.call.id is missing, not a string, or empty. Value: '${messageCallObject.id}'`);
+      }
+
+      if (messageCallObject.customer && typeof messageCallObject.customer === 'object' && messageCallObject.customer !== null &&
+          messageCallObject.customer.number && typeof messageCallObject.customer.number === 'string' && messageCallObject.customer.number.trim() !== '') {
+        actualUserPhoneNumber = messageCallObject.customer.number;
+        console.log(`SUCCESS: Extracted actualUserPhoneNumber from body.message.call.customer.number: '${actualUserPhoneNumber}'`);
+      } else {
+        console.warn(`WARNING: body.message.call.customer.number is missing, not a string, or empty. Value: ${messageCallObject.customer ? messageCallObject.customer.number : 'customer object missing'}`);
         actualUserPhoneNumber = null;
+      }
+    } else {
+      console.warn('WARNING: body.message.call is not a valid object or is null. Will check top-level body.call as a last resort.');
+      // Last resort: check top-level body.call if message.call failed (contradicts for...in but aligns with stringify)
+      if (body && body.call && typeof body.call === 'object' && body.call !== null) {
+        const topLevelCallObject = body.call;
+        console.log(`(Fallback Check) topLevelCallObject (body.call) keys: ${Object.keys(topLevelCallObject)}`);
+        if (topLevelCallObject.id && typeof topLevelCallObject.id === 'string' && topLevelCallObject.id.trim() !== '') {
+            actualVapiCallId = topLevelCallObject.id;
+            console.log(`SUCCESS (Fallback): Extracted actualVapiCallId from top-level body.call.id: '${actualVapiCallId}'`);
+        }
+         if (topLevelCallObject.customer && typeof topLevelCallObject.customer === 'object' && topLevelCallObject.customer !== null &&
+            topLevelCallObject.customer.number && typeof topLevelCallObject.customer.number === 'string' && topLevelCallObject.customer.number.trim() !== '') {
+            actualUserPhoneNumber = topLevelCallObject.customer.number;
+            console.log(`SUCCESS (Fallback): Extracted actualUserPhoneNumber from top-level body.call.customer.number: '${actualUserPhoneNumber}'`);
+        } else if (!actualUserPhoneNumber) { // Only set to null if not already found via message.call.customer
+            actualUserPhoneNumber = null;
+        }
+      }
     }
 
   } catch (e) {
