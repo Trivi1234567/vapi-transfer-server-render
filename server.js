@@ -13,7 +13,6 @@ const twilioClient = twilio(twilioAccountSid, twilioAuthToken);
 const twilioPhoneNumber = process.env.TWILIO_PHONE_NUMBER; // Your Twilio number for outbound calls
 
 // --- Application Configuration ---
-// Hardcoded specialist sequences with E.164 phone numbers
 const departmentSpecialists = {
     "New quote": [
         "+12485617008", // Ellen Satterlee
@@ -51,16 +50,11 @@ const departmentSpecialists = {
     ]
 };
 
-// Temporary in-memory store for pending transfers initiated by VAPI
 const pendingVapiRequests = {};
-
-// Temporary in-memory store for active sequential transfer sessions managed by Twilio
 const activeSequentialTransfers = {};
 
-// Initialize the Express application
 const app = express();
 
-// Middleware
 app.use(express.json({ limit: '5mb' }));
 app.use(express.urlencoded({ extended: true, limit: '5mb' }));
 
@@ -71,7 +65,6 @@ app.get('/health', (req, res) => {
   res.status(200).json({ status: 'UP', message: 'Server is healthy' });
 });
 
-// Endpoint VAPI calls to prepare for a transfer
 app.post('/api/vapi/prepare-sequential-transfer', (req, res) => {
   console.log('--- New Request to /api/vapi/prepare-sequential-transfer ---');
   console.log('Timestamp:', new Date().toISOString());
@@ -98,50 +91,72 @@ app.post('/api/vapi/prepare-sequential-transfer', (req, res) => {
         console.warn('WARNING: message.toolCallList[0].id missing.');
       }
 
-      if (firstToolCall && firstToolCall.function && firstToolCall.function.arguments && firstToolCall.function.arguments.departmentName) {
-        departmentName = firstToolCall.function.arguments.departmentName;
-        console.log(`SUCCESS: Extracted departmentName from LLM args: '${departmentName}'`);
+      if (firstToolCall && firstToolCall.function && firstToolCall.function.arguments) {
+        const toolArgs = firstToolCall.function.arguments;
+        departmentName = toolArgs.departmentName || toolArgs.department_name; // Check for both camelCase and snake_case
+        if (departmentName) {
+            console.log(`SUCCESS: Extracted departmentName from LLM args: '${departmentName}'`);
+        } else {
+            console.warn('WARNING: departmentName (or department_name) not found in message.toolCallList[0].function.arguments');
+        }
       } else {
-        console.warn('WARNING: departmentName not found in message.toolCallList[0].function.arguments.departmentName');
+        console.warn('WARNING: message.toolCallList[0].function.arguments missing.');
       }
     } else {
       console.warn('WARNING: body.message.toolCallList is not as expected. Attempting fallback for toolCallId and departmentName.');
+      // Fallback logic for older/alternative VAPI structures
       if (body && body.toolCall && body.toolCall.toolCallId) { 
         toolCallIdForResponse = body.toolCall.toolCallId;
         console.log(`SUCCESS (Fallback): Extracted toolCallIdForResponse from toolCall.toolCallId: ${toolCallIdForResponse}`);
-        if (body.toolCall.parameters && body.toolCall.parameters.departmentName){
-            departmentName = body.toolCall.parameters.departmentName;
-            console.log(`SUCCESS (Fallback): Extracted departmentName from toolCall.parameters: '${departmentName}'`);
-        } else if (body.toolCall.function && body.toolCall.function.arguments && body.toolCall.function.arguments.departmentName){
-            departmentName = body.toolCall.function.arguments.departmentName;
-            console.log(`SUCCESS (Fallback): Extracted departmentName from toolCall.function.arguments: '${departmentName}'`);
+        const params = body.toolCall.parameters || (body.toolCall.function && body.toolCall.function.arguments);
+        if (params) {
+            departmentName = params.departmentName || params.department_name;
+            if (departmentName) {
+                console.log(`SUCCESS (Fallback): Extracted departmentName: '${departmentName}'`);
+            } else {
+                 console.warn('WARNING (Fallback): departmentName (or department_name) not found in toolCall params/args.');
+            }
+        } else {
+            console.warn('WARNING (Fallback): No parameters or arguments found in toolCall.');
         }
       }
     }
 
-    console.log("--- Debugging req.body.message.call ---");
+    // Extract actualVapiCallId and actualUserPhoneNumber
+    // Priority 1: from body.message.call (as per VAPI Custom Tool docs)
     if (body && body.message && body.message.call && typeof body.message.call === 'object' && body.message.call !== null) {
       const messageCallObject = body.message.call;
-      console.log(`SUCCESS: body.message.call is an object. Keys: ${Object.keys(messageCallObject).join(', ')}`);
-      
+      console.log(`INFO: Found body.message.call. Keys: ${Object.keys(messageCallObject).join(', ')}`);
       if (messageCallObject.id && typeof messageCallObject.id === 'string' && messageCallObject.id.trim() !== '') {
         actualVapiCallId = messageCallObject.id;
         console.log(`SUCCESS: Extracted actualVapiCallId from body.message.call.id: '${actualVapiCallId}'`);
-      } else {
-        console.warn(`WARNING: body.message.call.id is missing, not a string, or empty. Value: '${messageCallObject.id}'`);
       }
-
       if (messageCallObject.customer && typeof messageCallObject.customer === 'object' && messageCallObject.customer !== null &&
           messageCallObject.customer.number && typeof messageCallObject.customer.number === 'string' && messageCallObject.customer.number.trim() !== '') {
         actualUserPhoneNumber = messageCallObject.customer.number;
         console.log(`SUCCESS: Extracted actualUserPhoneNumber from body.message.call.customer.number: '${actualUserPhoneNumber}'`);
-      } else {
-        console.warn(`WARNING: body.message.call.customer.number is missing, not a string, or empty. Value: ${messageCallObject.customer ? messageCallObject.customer.number : 'customer object missing in message.call'}`);
-        actualUserPhoneNumber = null;
       }
     } else {
-      console.warn('WARNING: body.message.call is not a valid object or is null. This is the primary expected path for call context.');
+        console.log('INFO: body.message.call not found or invalid. Checking top-level body.call.');
+        // Priority 2: from top-level body.call (as seen in some stringified logs)
+        if (body && body.call && typeof body.call === 'object' && body.call !== null) {
+            const topLevelCallObject = body.call;
+            console.log(`INFO: Found top-level body.call. Keys: ${Object.keys(topLevelCallObject).join(', ')}`);
+            if (topLevelCallObject.id && typeof topLevelCallObject.id === 'string' && topLevelCallObject.id.trim() !== '') {
+                actualVapiCallId = topLevelCallObject.id;
+                console.log(`SUCCESS (Fallback): Extracted actualVapiCallId from top-level body.call.id: '${actualVapiCallId}'`);
+            }
+            if (topLevelCallObject.customer && typeof topLevelCallObject.customer === 'object' && topLevelCallObject.customer !== null &&
+                topLevelCallObject.customer.number && typeof topLevelCallObject.customer.number === 'string' && topLevelCallObject.customer.number.trim() !== '') {
+                actualUserPhoneNumber = topLevelCallObject.customer.number;
+                console.log(`SUCCESS (Fallback): Extracted actualUserPhoneNumber from top-level body.call.customer.number: '${actualUserPhoneNumber}'`);
+            }
+        } else {
+            console.warn('WARNING: Top-level body.call also not found or invalid.');
+        }
     }
+    
+    if (!actualUserPhoneNumber) actualUserPhoneNumber = null; // Ensure it's null if not found
 
   } catch (e) {
     console.error('!!! UNEXPECTED ERROR during data extraction !!!:', e.message, e.stack);
@@ -197,7 +212,7 @@ app.post('/api/vapi/prepare-sequential-transfer', (req, res) => {
 // --- Twilio Inbound Call Endpoint (after VAPI transfers to this number) ---
 app.post('/twilio/voice/inbound-sequential-entry', async (req, res) => {
   const userTwilioCallSid = req.body.CallSid;
-  const fromUserPhoneNumber = req.body.From; // This is the end-user's phone number
+  const fromUserPhoneNumber = req.body.From; 
 
   console.log(`--- /twilio/voice/inbound-sequential-entry: Call from ${fromUserPhoneNumber}, Twilio CallSid: ${userTwilioCallSid} ---`);
   console.log('Twilio Request Body:', JSON.stringify(req.body, null, 2));
@@ -208,7 +223,7 @@ app.post('/twilio/voice/inbound-sequential-entry', async (req, res) => {
   if (pendingRequest && departmentSpecialists[pendingRequest.departmentName]) {
     console.log(`Found pending VAPI request for ${fromUserPhoneNumber}: Dept: ${pendingRequest.departmentName}`);
     const { departmentName, vapiCallId } = pendingRequest;
-    const specialists = departmentSpecialists[departmentName]; // Array of numbers
+    const specialists = departmentSpecialists[departmentName]; 
 
     if (specialists && specialists.length > 0) {
       const conferenceName = `conf_${userTwilioCallSid}`;
@@ -220,7 +235,7 @@ app.post('/twilio/voice/inbound-sequential-entry', async (req, res) => {
         specialistList: specialists,
         currentIndex: 0,
         conferenceName,
-        status: 'dialing_specialist_0' // Status indicates which specialist index
+        status: 'dialing_specialist_0' 
       };
       console.log('Active Sequential Transfers State Updated:', JSON.stringify(activeSequentialTransfers[userTwilioCallSid], null, 2));
 
@@ -236,10 +251,8 @@ app.post('/twilio/voice/inbound-sequential-entry', async (req, res) => {
       console.log(`Cleaned up pendingVapiRequests for ${fromUserPhoneNumber}`);
 
       const baseUrl = process.env.YOUR_RENDER_APP_BASE_URL || `http://localhost:${PORT}`;
-      // URL for the specialist to join the conference
       const specialistJoinUrl = `${baseUrl}/twilio/voice/specialist-join-conference?confName=${encodeURIComponent(conferenceName)}`;
-      // URL for Twilio to send status updates about the call to the specialist
-      const specialistStatusCallbackUrl = `${baseUrl}/twilio/voice/specialist-status?userCallSid=${encodeURIComponent(userTwilioCallSid)}&confName=${encodeURIComponent(conferenceName)}&specialistIndex=0`; // specialistIndex instead of currentIndex for clarity
+      const specialistStatusCallbackUrl = `${baseUrl}/twilio/voice/specialist-status?userCallSid=${encodeURIComponent(userTwilioCallSid)}&confName=${encodeURIComponent(conferenceName)}&specialistIndex=0`; 
       
       console.log(`Dialing first specialist: ${specialists[0]} for conference: ${conferenceName}`);
       console.log(`Specialist Join URL: ${specialistJoinUrl}`);
@@ -248,8 +261,6 @@ app.post('/twilio/voice/inbound-sequential-entry', async (req, res) => {
       try {
         if (!twilioPhoneNumber) {
             console.error("CRITICAL: TWILIO_PHONE_NUMBER (for outbound calls) is not set in environment variables.");
-            // Potentially play an error to the user in conference or hangup.
-            // For now, we just log and the TwiML will put them on hold.
         } else {
             await twilioClient.calls.create({
               to: specialists[0],
@@ -281,8 +292,6 @@ app.post('/twilio/voice/inbound-sequential-entry', async (req, res) => {
   res.send(twiml.toString());
 });
 
-
-// --- Start the server ---
 app.listen(PORT, () => {
   console.log(`Server is running on http://localhost:${PORT}`);
   console.log('Press Ctrl+C to stop the server.');
