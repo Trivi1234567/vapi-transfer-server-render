@@ -277,7 +277,7 @@ app.post('/twilio/voice/specialist-status', async (req, res) => {
 
 
   if (callWasAnsweredAndHuman) {
-    console.log(`[TWILIO_SPECIALIST_STATUS] SUCCESS: Specialist ${transferSession.specialistList[specialistIndex]} (idx ${specialistIndex}) answered and joined conference ${conferenceName}.`);
+    console.log(`[TWILIO_SPECIALIST_STATUS] SUCCESS: Specialist ${transferSession.specialistList[specialistIndex]} (idx ${specialistIndex}) answered conference ${conferenceName}.`);
     activeSequentialTransfers[userCallSid].status = `specialist_${specialistIndex}_joined`;
   } else {
     console.log(`[TWILIO_SPECIALIST_STATUS] INFO: Specialist ${transferSession.specialistList[specialistIndex]} (idx ${specialistIndex}) failed. Status: ${callStatus}, DialCallStatus: ${req.body.DialCallStatus}, AnsweredBy: ${answeredBy}.`);
