@@ -66,6 +66,7 @@ app.get('/health', (req, res) => {
   res.status(200).json({ status: 'UP', message: 'Server is healthy' });
 });
 
+// Endpoint VAPI calls to prepare for a transfer
 app.post('/api/vapi/prepare-sequential-transfer', (req, res) => {
   const requestTime = new Date().toISOString();
   console.log(`--- ${requestTime} [VAPI_PREPARE] New Request ---`);
