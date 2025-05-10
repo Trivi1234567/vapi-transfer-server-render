@@ -28,6 +28,18 @@ app.post('/api/vapi/prepare-sequential-transfer', (req, res) => {
   console.log('Raw Request Body from VAPI (type):', typeof req.body);
   console.log('Request Body from VAPI (stringified):', JSON.stringify(req.body, null, 2));
 
+  // Log all top-level keys of req.body
+  if (req.body && typeof req.body === 'object') {
+    console.log('--- Top-level keys in req.body ---');
+    for (const key in req.body) {
+      if (req.body.hasOwnProperty(key)) {
+        console.log(`Key: "${key}", Type: ${typeof req.body[key]}`);
+      }
+    }
+    console.log('--- End Top-level keys ---');
+  }
+
+
   let departmentName;
   let actualVapiCallId;
   let actualUserPhoneNumber;
@@ -35,13 +47,13 @@ app.post('/api/vapi/prepare-sequential-transfer', (req, res) => {
 
   // --- Safely extract data ---
   try {
-    const body = req.body; // Work with a local reference
+    const body = req.body; 
 
-    // 1. Extract toolCallIdForResponse (for responding to VAPI)
+    // 1. Extract toolCallIdForResponse
     if (body && body.message && body.message.toolCallList && Array.isArray(body.message.toolCallList) && body.message.toolCallList.length > 0 && body.message.toolCallList[0] && body.message.toolCallList[0].id) {
       toolCallIdForResponse = body.message.toolCallList[0].id;
       console.log(`SUCCESS: Extracted toolCallIdForResponse from message.toolCallList[0].id: ${toolCallIdForResponse}`);
-    } else if (body && body.toolCall && body.toolCall.toolCallId) { // Fallback for other VAPI structures
+    } else if (body && body.toolCall && body.toolCall.toolCallId) { 
         toolCallIdForResponse = body.toolCall.toolCallId;
         console.log(`SUCCESS (Fallback): Extracted toolCallIdForResponse from toolCall.toolCallId: ${toolCallIdForResponse}`);
     } else {
@@ -58,12 +70,12 @@ app.post('/api/vapi/prepare-sequential-transfer', (req, res) => {
       console.warn('WARNING: departmentName not found in message.toolCallList[0].function.arguments.departmentName');
     }
 
-    // 3. Extract actualVapiCallId from the main call object
-    console.log("--- Debugging req.body.call ---");
-    const callObject = body.call; // Assign to a variable first
-    console.log(`Type of callObject (body.call): ${typeof callObject}`);
+    // 3. Extract actualVapiCallId
+    console.log("--- Debugging req.body['call'] ---");
+    const callObject = body["call"]; // Using bracket notation
+    console.log(`Type of callObject (using body["call"]): ${typeof callObject}`);
     if (callObject && typeof callObject === 'object' && callObject !== null) {
-        console.log(`callObject keys: ${Object.keys(callObject)}`);
+        console.log(`callObject (from body["call"]) keys: ${Object.keys(callObject)}`);
         if (callObject.id && typeof callObject.id === 'string' && callObject.id.trim() !== '') {
             actualVapiCallId = callObject.id;
             console.log(`SUCCESS: Extracted actualVapiCallId from callObject.id: '${actualVapiCallId}'`);
@@ -71,13 +83,13 @@ app.post('/api/vapi/prepare-sequential-transfer', (req, res) => {
             console.warn(`WARNING: callObject.id is missing, not a string, or empty. Value: '${callObject.id}'`);
         }
     } else {
-        console.warn('WARNING: callObject (body.call) is not a valid object or is null.');
+        console.warn('WARNING: callObject (from body["call"]) is not a valid object or is null.');
     }
 
-    // 4. Extract actualUserPhoneNumber from the main call object's customer property
+    // 4. Extract actualUserPhoneNumber
     if (callObject && typeof callObject === 'object' && callObject !== null &&
         callObject.customer && typeof callObject.customer === 'object' && callObject.customer !== null) {
-        console.log(`callObject.customer keys: ${Object.keys(callObject.customer)}`);
+        console.log(`callObject.customer (from body["call"].customer) keys: ${Object.keys(callObject.customer)}`);
         if (callObject.customer.number && typeof callObject.customer.number === 'string' && callObject.customer.number.trim() !== '') {
             actualUserPhoneNumber = callObject.customer.number;
             console.log(`SUCCESS: Extracted actualUserPhoneNumber from callObject.customer.number: '${actualUserPhoneNumber}'`);
@@ -90,10 +102,9 @@ app.post('/api/vapi/prepare-sequential-transfer', (req, res) => {
     }
 
   } catch (e) {
-    console.error('!!! UNEXPECTED ERROR during data extraction !!!:', e);
-    // Fallback to ensure a response is sent
+    console.error('!!! UNEXPECTED ERROR during data extraction !!!:', e.message, e.stack);
     return res.status(500).json({
-        toolCallId: toolCallIdForResponse, // Use whatever we managed to get for toolCallId
+        toolCallId: toolCallIdForResponse,
         result: "Internal server error during request processing."
     });
   }
@@ -129,7 +140,6 @@ app.post('/api/vapi/prepare-sequential-transfer', (req, res) => {
   console.log(`SUCCESS_PROCESS: Prepared for sequential transfer for storageKey '${storageKey}' to department: ${departmentName}`);
   console.log('Current pendingTransfers:', JSON.stringify(pendingTransfers, null, 2));
 
-  // Send success response back to VAPI
   res.status(200).json({
     toolCallId: toolCallIdForResponse,
     result: `Successfully prepared for transfer to ${departmentName}. Ready for call.`
