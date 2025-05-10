@@ -51,8 +51,8 @@ const departmentSpecialists = {
     ]
 };
 
-const pendingVapiRequests = {}; // Stores initial VAPI request details
-const activeSequentialTransfers = {}; // Tracks active Twilio-managed transfer sequences
+const pendingVapiRequests = {}; 
+const activeSequentialTransfers = {}; 
 
 const app = express();
 
@@ -66,7 +66,6 @@ app.get('/health', (req, res) => {
   res.status(200).json({ status: 'UP', message: 'Server is healthy' });
 });
 
-// Endpoint VAPI calls to prepare for a transfer
 app.post('/api/vapi/prepare-sequential-transfer', (req, res) => {
   const requestTime = new Date().toISOString();
   console.log(`--- ${requestTime} [VAPI_PREPARE] New Request ---`);
@@ -118,8 +117,24 @@ app.post('/api/vapi/prepare-sequential-transfer', (req, res) => {
         } else {
           console.warn(`[VAPI_PREPARE] WARNING: body.message.call.customer.number is missing/invalid. Value: ${messageCallObject.customer ? messageCallObject.customer.number : 'customer object missing'}`);
         }
-      } else { console.warn('[VAPI_PREPARE] WARNING: body.message.call not found or invalid.'); }
-    
+      } else { 
+          console.warn('[VAPI_PREPARE] WARNING: body.message.call not found or invalid. Checking top-level body.call as fallback.');
+          if (body && body.call && typeof body.call === 'object' && body.call !== null) {
+            const topLevelCallObject = body.call;
+            console.log(`[VAPI_PREPARE] INFO (Fallback): Found top-level body.call. Keys: ${Object.keys(topLevelCallObject).join(', ')}`);
+            if (topLevelCallObject.id && typeof topLevelCallObject.id === 'string' && topLevelCallObject.id.trim() !== '') {
+                actualVapiCallId = topLevelCallObject.id;
+                console.log(`[VAPI_PREPARE] SUCCESS (Fallback): Extracted actualVapiCallId from top-level body.call.id: '${actualVapiCallId}'`);
+            }
+             if (topLevelCallObject.customer && typeof topLevelCallObject.customer === 'object' && topLevelCallObject.customer !== null &&
+                topLevelCallObject.customer.number && typeof topLevelCallObject.customer.number === 'string' && topLevelCallObject.customer.number.trim() !== '') {
+                actualUserPhoneNumber = topLevelCallObject.customer.number;
+                console.log(`[VAPI_PREPARE] SUCCESS (Fallback): Extracted actualUserPhoneNumber from top-level body.call.customer.number: '${actualUserPhoneNumber}'`);
+            }
+          } else {
+            console.warn('[VAPI_PREPARE] WARNING (Fallback): Top-level body.call also not found or invalid.');
+          }
+      }
     } else { console.warn('[VAPI_PREPARE] CRITICAL WARNING: Top-level "message" object missing in VAPI payload.'); }
     
     if (!actualUserPhoneNumber) actualUserPhoneNumber = null;
@@ -150,7 +165,6 @@ app.post('/api/vapi/prepare-sequential-transfer', (req, res) => {
   res.status(200).json({ results: [{ toolCallId: toolCallIdForResponse, result: `Successfully prepared for transfer to ${departmentName}. Ready for call.` }] });
 });
 
-// Twilio Inbound Call Endpoint (after VAPI transfers to this number)
 app.post('/twilio/voice/inbound-sequential-entry', async (req, res) => {
   const userTwilioCallSid = req.body.CallSid;
   const fromUserPhoneNumber = req.body.From; 
@@ -205,12 +219,12 @@ app.post('/twilio/voice/inbound-sequential-entry', async (req, res) => {
         }
       } catch (error) { console.error(`[TWILIO_INBOUND] Error calling first specialist ${specialists[0]}:`, error.message, error.stack); }
     } else {
-      console.warn(`[TWILIO_INBOUND] No specialists configured for department: ${departmentName}`);
-      twiml.say(`Sorry, no specialists are configured for the ${departmentName} department.`);
+      console.warn(`[TWILIO_INBOUND] No specialists configured or found for department: ${departmentName}`);
+      twiml.say(`Sorry, no specialists are configured for the ${departmentName} department at the moment.`);
       twiml.hangup();
     }
   } else {
-    console.warn(`[TWILIO_INBOUND] No pending VAPI request for ${fromUserPhoneNumber} or department misconfigured. Pending: ${pendingRequest}, Dept: ${pendingRequest ? pendingRequest.departmentName : 'N/A'}`);
+    console.warn(`[TWILIO_INBOUND] No pending VAPI request for ${fromUserPhoneNumber} or department misconfigured. Pending: ${JSON.stringify(pendingRequest)}, Dept: ${pendingRequest ? pendingRequest.departmentName : 'N/A'}`);
     twiml.say("Sorry, we couldn't process your transfer request. Please try again.");
     twiml.hangup();
   }
@@ -218,7 +232,6 @@ app.post('/twilio/voice/inbound-sequential-entry', async (req, res) => {
   res.send(twiml.toString());
 });
 
-// Twilio Endpoint for Specialist to Join Conference
 app.post('/twilio/voice/specialist-join-conference', (req, res) => {
   const conferenceName = req.query.confName; 
   const requestTime = new Date().toISOString();
@@ -239,7 +252,6 @@ app.post('/twilio/voice/specialist-join-conference', (req, res) => {
   res.send(twiml.toString());
 });
 
-// Twilio Endpoint for Specialist Call Status Updates
 app.post('/twilio/voice/specialist-status', async (req, res) => {
   const userCallSid = req.query.userCallSid; 
   const conferenceName = req.query.confName;
@@ -250,7 +262,7 @@ app.post('/twilio/voice/specialist-status', async (req, res) => {
   const requestTime = new Date().toISOString();
 
   console.log(`--- ${requestTime} [TWILIO_SPECIALIST_STATUS] UserCallSid: ${userCallSid}, SpecialistIdx: ${specialistIndex} ---`);
-  console.log(`[TWILIO_SPECIALIST_STATUS] Specialist CallSid: ${specialistCallSid}, Status: ${callStatus}, AnsweredBy: ${answeredBy}`);
+  console.log(`[TWILIO_SPECIALIST_STATUS] Specialist CallSid: ${specialistCallSid}, Status: ${callStatus}, AnsweredBy: ${answeredBy}, DialCallStatus: ${req.body.DialCallStatus}, Duration: ${req.body.Duration}`);
   console.log('[TWILIO_SPECIALIST_STATUS] Twilio Status Callback Body:', JSON.stringify(req.body, null, 2));
 
   const transferSession = activeSequentialTransfers[userCallSid];
@@ -260,10 +272,12 @@ app.post('/twilio/voice/specialist-status', async (req, res) => {
     return res.status(200).send(); 
   }
   
-  const successfulConnection = callStatus === 'completed' && req.body.DialCallStatus !== 'no-answer' && req.body.DialCallStatus !== 'busy' && req.body.DialCallStatus !== 'failed' && req.body.DialCallStatus !== 'canceled' && (!answeredBy || (answeredBy && !answeredBy.startsWith('machine') && answeredBy !== 'fax' && answeredBy !== 'unknown'));
-  
-  if (successfulConnection) {
-    console.log(`[TWILIO_SPECIALIST_STATUS] SUCCESS: Specialist ${transferSession.specialistList[specialistIndex]} (idx ${specialistIndex}) answered conference ${conferenceName}.`);
+  const callWasAnsweredAndHuman = (callStatus === 'completed' && parseInt(req.body.Duration, 10) > 0 && (!answeredBy || (answeredBy && answeredBy.toLowerCase() === 'human'))) ||
+                                (callStatus === 'in-progress' && (!answeredBy || (answeredBy && answeredBy.toLowerCase() === 'human')));
+
+
+  if (callWasAnsweredAndHuman) {
+    console.log(`[TWILIO_SPECIALIST_STATUS] SUCCESS: Specialist ${transferSession.specialistList[specialistIndex]} (idx ${specialistIndex}) answered and joined conference ${conferenceName}.`);
     activeSequentialTransfers[userCallSid].status = `specialist_${specialistIndex}_joined`;
   } else {
     console.log(`[TWILIO_SPECIALIST_STATUS] INFO: Specialist ${transferSession.specialistList[specialistIndex]} (idx ${specialistIndex}) failed. Status: ${callStatus}, DialCallStatus: ${req.body.DialCallStatus}, AnsweredBy: ${answeredBy}.`);
@@ -293,7 +307,7 @@ app.post('/twilio/voice/specialist-status', async (req, res) => {
       console.log(`[TWILIO_SPECIALIST_STATUS] INFO: All specialists tried for department ${transferSession.departmentName} for userCallSid ${userCallSid}.`);
       activeSequentialTransfers[userCallSid].status = 'all_specialists_failed';
       console.log("[TWILIO_SPECIALIST_STATUS] VOICEMAIL FALLBACK TO BE IMPLEMENTED HERE.");
-      // TODO: Implement voicemail logic (e.g., redirect user's call leg in conference to a VAPI voicemail prompt)
+      // TODO: Implement voicemail logic 
     }
   }
   console.log('[TWILIO_SPECIALIST_STATUS] Updated Active Transfer Session:', JSON.stringify(activeSequentialTransfers[userCallSid], null, 2));
